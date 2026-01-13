@@ -1,0 +1,276 @@
+name: CI Pipeline
+
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+    branches: [ master, main ]
+  workflow_dispatch:
+
+env:
+  PYTHON_VERSION: '3.11'
+  DOCKER_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/devops-fastapi
+
+jobs:
+  # Stage 1: Code Quality and Linting
+  lint:
+    name: Code Linting
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install flake8
+
+      - name: Run Flake8
+        run: |
+          flake8 . --count --show-source --statistics
+          echo "✅ Linting passed successfully"
+
+  # Stage 2: SAST - Static Application Security Testing
+  sast:
+    name: SAST - CodeQL Analysis
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      actions: read
+      contents: read
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: python
+          queries: security-and-quality
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:python"
+
+  # Stage 3: SCA - Software Composition Analysis
+  sca:
+    name: SCA - Dependency Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pip-audit
+
+      - name: Run pip-audit
+        run: |
+          pip-audit --requirement requirements.txt --desc
+          echo "✅ No vulnerable dependencies found"
+
+  # Stage 4: Unit Testing
+  test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    needs: [lint]
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Run Tests with Coverage
+        run: |
+          pytest --cov=. --cov-report=xml --cov-report=term-missing
+          echo "✅ All tests passed"
+
+      - name: Upload Coverage Report
+        uses: codecov/codecov-action@v4
+        if: always()
+        with:
+          files: ./coverage.xml
+          fail_ci_if_error: false
+
+  # Stage 5: Docker Build
+  build:
+    name: Docker Build
+    runs-on: ubuntu-latest
+    needs: [lint, test]
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker Image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false
+          tags: ${{ env.DOCKER_IMAGE }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          load: true
+
+      - name: Save Docker Image
+        run: |
+          docker save ${{ env.DOCKER_IMAGE }}:${{ github.sha }} -o /tmp/docker-image.tar
+
+      - name: Upload Docker Image Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image
+          path: /tmp/docker-image.tar
+          retention-days: 1
+
+  # Stage 6: Container Image Scanning
+  scan:
+    name: Container Security Scan
+    runs-on: ubuntu-latest
+    needs: [build]
+    steps:
+      - name: Download Docker Image
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+          path: /tmp
+
+      - name: Load Docker Image
+        run: |
+          docker load -i /tmp/docker-image.tar
+
+      - name: Run Trivy Scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.DOCKER_IMAGE }}:${{ github.sha }}
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH'
+
+      - name: Upload Trivy Results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+      - name: Run Trivy Scan (Table Format)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.DOCKER_IMAGE }}:${{ github.sha }}
+          format: 'table'
+          severity: 'CRITICAL,HIGH'
+
+  # Stage 7: Runtime Container Testing
+  runtime-test:
+    name: Runtime Container Test
+    runs-on: ubuntu-latest
+    needs: [build, scan]
+    steps:
+      - name: Download Docker Image
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+          path: /tmp
+
+      - name: Load Docker Image
+        run: |
+          docker load -i /tmp/docker-image.tar
+
+      - name: Run Container
+        run: |
+          docker run -d -p 8000:8000 --name test-app ${{ env.DOCKER_IMAGE }}:${{ github.sha }}
+          echo "⏳ Waiting for application to start..."
+          sleep 10
+
+      - name: Test Health Endpoint
+        run: |
+          response=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8000/health)
+          if [ $response -eq 200 ]; then
+            echo "✅ Health check passed"
+          else
+            echo "❌ Health check failed with status code: $response"
+            exit 1
+          fi
+
+      - name: Test Items Endpoint
+        run: |
+          response=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8000/items)
+          if [ $response -eq 200 ]; then
+            echo "✅ Items endpoint test passed"
+          else
+            echo "❌ Items endpoint test failed with status code: $response"
+            exit 1
+          fi
+
+      - name: View Container Logs
+        if: always()
+        run: |
+          docker logs test-app
+
+      - name: Stop Container
+        if: always()
+        run: |
+          docker stop test-app
+          docker rm test-app
+
+  # Stage 8: Push to DockerHub
+  push:
+    name: Push to DockerHub
+    runs-on: ubuntu-latest
+    needs: [runtime-test, sast, sca]
+    if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
+    steps:
+      - name: Download Docker Image
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+          path: /tmp
+
+      - name: Load Docker Image
+        run: |
+          docker load -i /tmp/docker-image.tar
+
+      - name: Login to DockerHub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Tag and Push Docker Image
+        run: |
+          # Tag with commit SHA
+          docker tag ${{ env.DOCKER_IMAGE }}:${{ github.sha }} ${{ env.DOCKER_IMAGE }}:${{ github.sha }}
+          docker push ${{ env.DOCKER_IMAGE }}:${{ github.sha }}
+          
+          # Tag with latest
+          docker tag ${{ env.DOCKER_IMAGE }}:${{ github.sha }} ${{ env.DOCKER_IMAGE }}:latest
+          docker push ${{ env.DOCKER_IMAGE }}:latest
+          
+          echo "✅ Docker image pushed successfully"
+          echo "📦 Image: ${{ env.DOCKER_IMAGE }}:latest"
+          echo "📦 Image: ${{ env.DOCKER_IMAGE }}:${{ github.sha }}"

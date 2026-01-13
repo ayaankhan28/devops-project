@@ -1,0 +1,115 @@
+name: CD - Deploy to Staging
+
+on:
+  workflow_run:
+    workflows: ["CI Pipeline"]
+    types:
+      - completed
+    branches: [master, main]
+  workflow_dispatch:
+
+env:
+  DOCKER_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/devops-fastapi
+  DEPLOYMENT_PORT: 8001
+
+jobs:
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
+    environment:
+      name: staging
+      url: http://localhost:8001
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Login to DockerHub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Pull Latest Docker Image
+        run: |
+          docker pull ${{ env.DOCKER_IMAGE }}:latest
+          echo "✅ Pulled latest Docker image"
+
+      - name: Stop Existing Container
+        continue-on-error: true
+        run: |
+          docker stop devops-fastapi-staging || true
+          docker rm devops-fastapi-staging || true
+          echo "🔄 Stopped existing staging container"
+
+      - name: Deploy to Staging
+        run: |
+          docker run -d \
+            --name devops-fastapi-staging \
+            -p ${{ env.DEPLOYMENT_PORT }}:8000 \
+            --restart unless-stopped \
+            -e ENVIRONMENT=staging \
+            ${{ env.DOCKER_IMAGE }}:latest
+          
+          echo "⏳ Waiting for application to start..."
+          sleep 15
+
+      - name: Health Check
+        run: |
+          max_attempts=10
+          attempt=1
+          
+          while [ $attempt -le $max_attempts ]; do
+            echo "🔍 Health check attempt $attempt/$max_attempts"
+            response=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:${{ env.DEPLOYMENT_PORT }}/health)
+            
+            if [ $response -eq 200 ]; then
+              echo "✅ Staging deployment successful - Health check passed"
+              exit 0
+            fi
+            
+            echo "⏳ Waiting for application to be ready..."
+            sleep 5
+            attempt=$((attempt + 1))
+          done
+          
+          echo "❌ Health check failed after $max_attempts attempts"
+          exit 1
+
+      - name: Run Smoke Tests
+        run: |
+          echo "🧪 Running smoke tests..."
+          
+          # Test health endpoint
+          curl -f http://localhost:${{ env.DEPLOYMENT_PORT }}/health || exit 1
+          echo "✅ Health endpoint test passed"
+          
+          # Test items endpoint
+          curl -f http://localhost:${{ env.DEPLOYMENT_PORT }}/items || exit 1
+          echo "✅ Items endpoint test passed"
+          
+          # Test root endpoint
+          curl -f http://localhost:${{ env.DEPLOYMENT_PORT }}/ || exit 1
+          echo "✅ Root endpoint test passed"
+          
+          echo "✅ All smoke tests passed"
+
+      - name: Rollback on Failure
+        if: failure()
+        run: |
+          echo "❌ Deployment failed - Rolling back"
+          docker stop devops-fastapi-staging || true
+          docker rm devops-fastapi-staging || true
+          echo "🔄 Rollback completed"
+
+      - name: Deployment Summary
+        if: success()
+        run: |
+          echo "🎉 Staging Deployment Summary"
+          echo "================================"
+          echo "Environment: Staging"
+          echo "Image: ${{ env.DOCKER_IMAGE }}:latest"
+          echo "Port: ${{ env.DEPLOYMENT_PORT }}"
+          echo "Status: ✅ Deployed Successfully"
+          echo "================================"
+          docker ps | grep devops-fastapi-staging

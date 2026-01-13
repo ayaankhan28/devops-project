@@ -1,0 +1,185 @@
+name: CD - Deploy to Production
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Docker image tag to deploy (e.g., latest or commit SHA)'
+        required: true
+        default: 'latest'
+
+env:
+  DOCKER_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/devops-fastapi
+  DEPLOYMENT_PORT: 8000
+
+jobs:
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: http://localhost:8000
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Login to DockerHub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Pull Docker Image
+        run: |
+          docker pull ${{ env.DOCKER_IMAGE }}:${{ github.event.inputs.version }}
+          echo "✅ Pulled Docker image: ${{ env.DOCKER_IMAGE }}:${{ github.event.inputs.version }}"
+
+      - name: Backup Current Container
+        continue-on-error: true
+        run: |
+          if docker ps -a | grep -q devops-fastapi-production; then
+            docker commit devops-fastapi-production devops-fastapi-backup:$(date +%Y%m%d-%H%M%S)
+            echo "✅ Created backup of current production container"
+          fi
+
+      - name: Stop Existing Container
+        continue-on-error: true
+        run: |
+          docker stop devops-fastapi-production || true
+          docker rm devops-fastapi-production || true
+          echo "🔄 Stopped existing production container"
+
+      - name: Deploy to Production
+        run: |
+          docker run -d \
+            --name devops-fastapi-production \
+            -p ${{ env.DEPLOYMENT_PORT }}:8000 \
+            --restart unless-stopped \
+            -e ENVIRONMENT=production \
+            ${{ env.DOCKER_IMAGE }}:${{ github.event.inputs.version }}
+          
+          echo "⏳ Waiting for application to start..."
+          sleep 15
+
+      - name: Health Check
+        run: |
+          max_attempts=15
+          attempt=1
+          
+          while [ $attempt -le $max_attempts ]; do
+            echo "🔍 Health check attempt $attempt/$max_attempts"
+            response=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:${{ env.DEPLOYMENT_PORT }}/health)
+            
+            if [ $response -eq 200 ]; then
+              echo "✅ Production deployment successful - Health check passed"
+              exit 0
+            fi
+            
+            echo "⏳ Waiting for application to be ready..."
+            sleep 5
+            attempt=$((attempt + 1))
+          done
+          
+          echo "❌ Health check failed after $max_attempts attempts"
+          exit 1
+
+      - name: Run Production Smoke Tests
+        run: |
+          echo "🧪 Running production smoke tests..."
+          
+          # Test health endpoint
+          health_response=$(curl -s http://localhost:${{ env.DEPLOYMENT_PORT }}/health)
+          echo "Health Response: $health_response"
+          curl -f http://localhost:${{ env.DEPLOYMENT_PORT }}/health || exit 1
+          echo "✅ Health endpoint test passed"
+          
+          # Test items endpoint
+          curl -f http://localhost:${{ env.DEPLOYMENT_PORT }}/items || exit 1
+          echo "✅ Items endpoint test passed"
+          
+          # Test root endpoint
+          curl -f http://localhost:${{ env.DEPLOYMENT_PORT }}/ || exit 1
+          echo "✅ Root endpoint test passed"
+          
+          # Test API documentation
+          curl -f http://localhost:${{ env.DEPLOYMENT_PORT }}/docs || exit 1
+          echo "✅ API documentation accessible"
+          
+          echo "✅ All production smoke tests passed"
+
+      - name: Performance Check
+        run: |
+          echo "⚡ Running performance checks..."
+          
+          # Test response time
+          response_time=$(curl -o /dev/null -s -w '%{time_total}\n' http://localhost:${{ env.DEPLOYMENT_PORT }}/health)
+          echo "Response time: ${response_time}s"
+          
+          # Check if response time is acceptable (less than 2 seconds)
+          if (( $(echo "$response_time < 2.0" | bc -l) )); then
+            echo "✅ Performance check passed"
+          else
+            echo "⚠️ Warning: Response time is higher than expected"
+          fi
+
+      - name: Rollback on Failure
+        if: failure()
+        run: |
+          echo "❌ Production deployment failed - Initiating rollback"
+          
+          docker stop devops-fastapi-production || true
+          docker rm devops-fastapi-production || true
+          
+          # Find the most recent backup
+          backup_image=$(docker images devops-fastapi-backup --format "{{.Repository}}:{{.Tag}}" | head -n 1)
+          
+          if [ ! -z "$backup_image" ]; then
+            echo "🔄 Rolling back to: $backup_image"
+            docker run -d \
+              --name devops-fastapi-production \
+              -p ${{ env.DEPLOYMENT_PORT }}:8000 \
+              --restart unless-stopped \
+              -e ENVIRONMENT=production \
+              $backup_image
+            
+            sleep 10
+            
+            # Verify rollback
+            if curl -f http://localhost:${{ env.DEPLOYMENT_PORT }}/health; then
+              echo "✅ Rollback successful"
+            else
+              echo "❌ Rollback failed - Manual intervention required"
+            fi
+          else
+            echo "⚠️ No backup found - Manual intervention required"
+          fi
+
+      - name: Cleanup Old Backups
+        if: success()
+        run: |
+          echo "🧹 Cleaning up old backups (keeping last 3)"
+          docker images devops-fastapi-backup --format "{{.Repository}}:{{.Tag}}" | tail -n +4 | xargs -r docker rmi || true
+
+      - name: Deployment Summary
+        if: success()
+        run: |
+          echo "🎉 Production Deployment Summary"
+          echo "================================"
+          echo "Environment: Production"
+          echo "Image: ${{ env.DOCKER_IMAGE }}:${{ github.event.inputs.version }}"
+          echo "Port: ${{ env.DEPLOYMENT_PORT }}"
+          echo "Status: ✅ Deployed Successfully"
+          echo "Deployed at: $(date)"
+          echo "================================"
+          docker ps | grep devops-fastapi-production
+
+      - name: Send Notification
+        if: always()
+        run: |
+          if [ "${{ job.status }}" == "success" ]; then
+            echo "✅ Production deployment completed successfully"
+            echo "Image: ${{ env.DOCKER_IMAGE }}:${{ github.event.inputs.version }}"
+          else
+            echo "❌ Production deployment failed"
+            echo "Please check the logs and take necessary action"
+          fi
