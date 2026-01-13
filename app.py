@@ -29,6 +29,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 # Pydantic models
 class Item(BaseModel):
     id: int
@@ -37,18 +38,39 @@ class Item(BaseModel):
     price: float
     in_stock: bool = True
 
+
 class ItemCreate(BaseModel):
     name: str
     description: Optional[str] = None
     price: float
     in_stock: bool = True
 
+
 # In-memory database (for demonstration)
 items_db: List[Item] = [
-    Item(id=1, name="Laptop", description="High-performance laptop", price=1200.00, in_stock=True),
-    Item(id=2, name="Mouse", description="Wireless mouse", price=25.00, in_stock=True),
-    Item(id=3, name="Keyboard", description="Mechanical keyboard", price=80.00, in_stock=False),
+    Item(
+        id=1,
+        name="Laptop",
+        description="High-performance laptop",
+        price=1200.00,
+        in_stock=True
+    ),
+    Item(
+        id=2,
+        name="Mouse",
+        description="Wireless mouse",
+        price=25.00,
+        in_stock=True
+    ),
+    Item(
+        id=3,
+        name="Keyboard",
+        description="Mechanical keyboard",
+        price=80.00,
+        in_stock=False
+    ),
 ]
+
 
 @app.get("/")
 async def root():
@@ -63,6 +85,7 @@ async def root():
         }
     }
 
+
 @app.get("/health")
 async def health_check():
     """Health check endpoint for monitoring"""
@@ -73,11 +96,13 @@ async def health_check():
         "version": "1.0.0"
     }
 
+
 @app.get("/items", response_model=List[Item])
 async def get_items():
     """Get all items"""
     logger.info(f"Fetching all items. Total: {len(items_db)}")
     return items_db
+
 
 @app.get("/items/{item_id}", response_model=Item)
 async def get_item(item_id: int):
@@ -87,17 +112,22 @@ async def get_item(item_id: int):
         if item.id == item_id:
             return item
     logger.warning(f"Item with ID {item_id} not found")
-    raise HTTPException(status_code=404, detail=f"Item with ID {item_id} not found")
+    raise HTTPException(
+        status_code=404,
+        detail=f"Item with ID {item_id} not found"
+    )
+
 
 @app.post("/items", response_model=Item, status_code=201)
 async def create_item(item: ItemCreate):
     """Create a new item"""
     # Generate new ID
     new_id = max([i.id for i in items_db], default=0) + 1
-    new_item = Item(id=new_id, **item.dict())
+    new_item = Item(id=new_id, **item.model_dump())
     items_db.append(new_item)
     logger.info(f"Created new item with ID: {new_id}")
     return new_item
+
 
 @app.put("/items/{item_id}", response_model=Item)
 async def update_item(item_id: int, item: ItemCreate):
@@ -105,12 +135,16 @@ async def update_item(item_id: int, item: ItemCreate):
     logger.info(f"Updating item with ID: {item_id}")
     for idx, existing_item in enumerate(items_db):
         if existing_item.id == item_id:
-            updated_item = Item(id=item_id, **item.dict())
+            updated_item = Item(id=item_id, **item.model_dump())
             items_db[idx] = updated_item
             logger.info(f"Successfully updated item with ID: {item_id}")
             return updated_item
     logger.warning(f"Item with ID {item_id} not found for update")
-    raise HTTPException(status_code=404, detail=f"Item with ID {item_id} not found")
+    raise HTTPException(
+        status_code=404,
+        detail=f"Item with ID {item_id} not found"
+    )
+
 
 @app.delete("/items/{item_id}")
 async def delete_item(item_id: int):
@@ -120,9 +154,16 @@ async def delete_item(item_id: int):
         if item.id == item_id:
             deleted_item = items_db.pop(idx)
             logger.info(f"Successfully deleted item with ID: {item_id}")
-            return {"message": f"Item {item_id} deleted successfully", "item": deleted_item}
+            return {
+                "message": f"Item {item_id} deleted successfully",
+                "item": deleted_item
+            }
     logger.warning(f"Item with ID {item_id} not found for deletion")
-    raise HTTPException(status_code=404, detail=f"Item with ID {item_id} not found")
+    raise HTTPException(
+        status_code=404,
+        detail=f"Item with ID {item_id} not found"
+    )
+
 
 if __name__ == "__main__":
     import uvicorn
