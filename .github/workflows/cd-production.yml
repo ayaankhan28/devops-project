@@ -1,6 +1,11 @@
 name: CD - Deploy to Production
 
 on:
+  workflow_run:
+    workflows: ["CD - Deploy to Staging"]
+    types:
+      - completed
+    branches: [master, main]
   workflow_dispatch:
     inputs:
       version:
@@ -16,6 +21,7 @@ jobs:
   deploy-production:
     name: Deploy to Production
     runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
     environment:
       name: production
       url: http://localhost:8000
@@ -31,8 +37,13 @@ jobs:
 
       - name: Pull Docker Image
         run: |
-          docker pull ${{ env.DOCKER_IMAGE }}:${{ github.event.inputs.version }}
-          echo "✅ Pulled Docker image: ${{ env.DOCKER_IMAGE }}:${{ github.event.inputs.version }}"
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            IMAGE_TAG="${{ github.event.inputs.version }}"
+          else
+            IMAGE_TAG="latest"
+          fi
+          docker pull ${{ env.DOCKER_IMAGE }}:${IMAGE_TAG}
+          echo "✅ Pulled Docker image: ${{ env.DOCKER_IMAGE }}:${IMAGE_TAG}"
 
       - name: Backup Current Container
         continue-on-error: true
@@ -51,12 +62,18 @@ jobs:
 
       - name: Deploy to Production
         run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            IMAGE_TAG="${{ github.event.inputs.version }}"
+          else
+            IMAGE_TAG="latest"
+          fi
+          
           docker run -d \
             --name devops-fastapi-production \
             -p ${{ env.DEPLOYMENT_PORT }}:8000 \
             --restart unless-stopped \
             -e ENVIRONMENT=production \
-            ${{ env.DOCKER_IMAGE }}:${{ github.event.inputs.version }}
+            ${{ env.DOCKER_IMAGE }}:${IMAGE_TAG}
           
           echo "⏳ Waiting for application to start..."
           sleep 15
@@ -163,22 +180,36 @@ jobs:
       - name: Deployment Summary
         if: success()
         run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            IMAGE_TAG="${{ github.event.inputs.version }}"
+          else
+            IMAGE_TAG="latest"
+          fi
+          
           echo "🎉 Production Deployment Summary"
           echo "================================"
           echo "Environment: Production"
-          echo "Image: ${{ env.DOCKER_IMAGE }}:${{ github.event.inputs.version }}"
+          echo "Image: ${{ env.DOCKER_IMAGE }}:${IMAGE_TAG}"
           echo "Port: ${{ env.DEPLOYMENT_PORT }}"
           echo "Status: ✅ Deployed Successfully"
           echo "Deployed at: $(date)"
+          echo "Trigger: ${{ github.event_name }}"
           echo "================================"
           docker ps | grep devops-fastapi-production
 
       - name: Send Notification
         if: always()
         run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            IMAGE_TAG="${{ github.event.inputs.version }}"
+          else
+            IMAGE_TAG="latest"
+          fi
+          
           if [ "${{ job.status }}" == "success" ]; then
             echo "✅ Production deployment completed successfully"
-            echo "Image: ${{ env.DOCKER_IMAGE }}:${{ github.event.inputs.version }}"
+            echo "Image: ${{ env.DOCKER_IMAGE }}:${IMAGE_TAG}"
+            echo "Trigger: ${{ github.event_name }}"
           else
             echo "❌ Production deployment failed"
             echo "Please check the logs and take necessary action"
