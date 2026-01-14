@@ -2,6 +2,6 @@ fastapi>=0.115.0
 starlette>=0.47.2
 uvicorn[standard]==0.27.0
 pydantic==2.5.3
-pytest==7.4.4
+pytest==9.0.2
 pytest-cov==4.1.0
 httpx==0.26.0
