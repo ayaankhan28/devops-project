@@ -51,7 +51,7 @@ items_db: List[Item] = [
     Item(
         id=1,
         name="Laptop",
-        description="High-performance laptop",
+        description="High-performance laptop mac",
         price=1200.00,
         in_stock=True
     ),
@@ -93,7 +93,7 @@ async def health_check():
     return {
         "status": "healthy",
         "service": "devops-fastapi",
-        "version": "1.1.0"
+        "version": "1.0.0"
     }
 
 
