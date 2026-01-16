@@ -11,60 +11,59 @@ on:
 env:
   DOCKER_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/devops-fastapi
   DEPLOYMENT_PORT: 8001
+  ENVIRONMENT: staging
 
 jobs:
   deploy-staging:
-    name: Deploy to Staging
+    name: Deploy to Staging VM
     runs-on: ubuntu-latest
     if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
     environment:
       name: staging
-      url: http://localhost:8001
+      url: http://${{ secrets.VM_HOST }}:8001
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Login to DockerHub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Pull Latest Docker Image
+      - name: Setup SSH
         run: |
-          docker pull ${{ env.DOCKER_IMAGE }}:latest
-          echo "✅ Pulled latest Docker image"
+          mkdir -p ~/.ssh
+          echo "${{ secrets.VM_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -p ${{ secrets.VM_SSH_PORT || 22 }} -H ${{ secrets.VM_HOST }} >> ~/.ssh/known_hosts
+          echo "✅ SSH configured"
 
-      - name: Stop Existing Container
-        continue-on-error: true
+      - name: Copy Deployment Script to VM
         run: |
-          docker stop devops-fastapi-staging || true
-          docker rm devops-fastapi-staging || true
-          echo "🔄 Stopped existing staging container"
+          scp -i ~/.ssh/deploy_key \
+              -P ${{ secrets.VM_SSH_PORT || 22 }} \
+              scripts/vm-deploy.sh \
+              ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }}:~/deployments/scripts/
+          echo "✅ Deployment script copied to VM"
 
-      - name: Deploy to Staging
+      - name: Deploy to Staging VM
         run: |
-          docker run -d \
-            --name devops-fastapi-staging \
-            -p ${{ env.DEPLOYMENT_PORT }}:8000 \
-            --restart unless-stopped \
-            -e ENVIRONMENT=staging \
-            ${{ env.DOCKER_IMAGE }}:latest
-          
-          echo "⏳ Waiting for application to start..."
-          sleep 15
+          ssh -i ~/.ssh/deploy_key \
+              -p ${{ secrets.VM_SSH_PORT || 22 }} \
+              ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} \
+              "bash ~/deployments/scripts/vm-deploy.sh \
+                ${{ env.ENVIRONMENT }} \
+                ${{ env.DOCKER_IMAGE }} \
+                latest \
+                ${{ env.DEPLOYMENT_PORT }}"
 
-      - name: Health Check
+      - name: Verify Deployment
         run: |
+          echo "🔍 Verifying deployment on VM..."
           max_attempts=10
           attempt=1
           
           while [ $attempt -le $max_attempts ]; do
-            echo "🔍 Health check attempt $attempt/$max_attempts"
-            response=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:${{ env.DEPLOYMENT_PORT }}/health)
+            echo "Verification attempt $attempt/$max_attempts"
+            response=$(curl -s -o /dev/null -w "%{http_code}" http://${{ secrets.VM_HOST }}:${{ env.DEPLOYMENT_PORT }}/health || echo "000")
             
             if [ $response -eq 200 ]; then
-              echo "✅ Staging deployment successful - Health check passed"
+              echo "✅ Staging deployment verified - Health check passed"
               exit 0
             fi
             
@@ -73,34 +72,50 @@ jobs:
             attempt=$((attempt + 1))
           done
           
-          echo "❌ Health check failed after $max_attempts attempts"
+          echo "❌ Verification failed after $max_attempts attempts"
           exit 1
 
-      - name: Run Smoke Tests
+      - name: Run Remote Smoke Tests
         run: |
-          echo "🧪 Running smoke tests..."
+          echo "🧪 Running smoke tests on staging VM..."
           
           # Test health endpoint
-          curl -f http://localhost:${{ env.DEPLOYMENT_PORT }}/health || exit 1
+          curl -f http://${{ secrets.VM_HOST }}:${{ env.DEPLOYMENT_PORT }}/health || exit 1
           echo "✅ Health endpoint test passed"
           
           # Test items endpoint
-          curl -f http://localhost:${{ env.DEPLOYMENT_PORT }}/items || exit 1
+          curl -f http://${{ secrets.VM_HOST }}:${{ env.DEPLOYMENT_PORT }}/items || exit 1
           echo "✅ Items endpoint test passed"
           
           # Test root endpoint
-          curl -f http://localhost:${{ env.DEPLOYMENT_PORT }}/ || exit 1
+          curl -f http://${{ secrets.VM_HOST }}:${{ env.DEPLOYMENT_PORT }}/ || exit 1
           echo "✅ Root endpoint test passed"
           
           echo "✅ All smoke tests passed"
 
-      - name: Rollback on Failure
+      - name: Get Container Status
+        if: always()
+        run: |
+          echo "📊 Container Status on VM:"
+          ssh -i ~/.ssh/deploy_key \
+              -p ${{ secrets.VM_SSH_PORT || 22 }} \
+              ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} \
+              "docker ps | grep devops-fastapi-staging || echo 'Container not running'"
+
+      - name: Get Container Logs
         if: failure()
         run: |
-          echo "❌ Deployment failed - Rolling back"
-          docker stop devops-fastapi-staging || true
-          docker rm devops-fastapi-staging || true
-          echo "🔄 Rollback completed"
+          echo "📋 Container Logs:"
+          ssh -i ~/.ssh/deploy_key \
+              -p ${{ secrets.VM_SSH_PORT || 22 }} \
+              ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} \
+              "docker logs devops-fastapi-staging --tail 100 || echo 'No logs available'"
+
+      - name: Cleanup SSH
+        if: always()
+        run: |
+          rm -f ~/.ssh/deploy_key
+          echo "✅ SSH cleanup completed"
 
       - name: Deployment Summary
         if: success()
@@ -109,7 +124,16 @@ jobs:
           echo "================================"
           echo "Environment: Staging"
           echo "Image: ${{ env.DOCKER_IMAGE }}:latest"
+          echo "VM Host: ${{ secrets.VM_HOST }}"
           echo "Port: ${{ env.DEPLOYMENT_PORT }}"
           echo "Status: ✅ Deployed Successfully"
+          echo "URL: http://${{ secrets.VM_HOST }}:${{ env.DEPLOYMENT_PORT }}"
           echo "================================"
-          docker ps | grep devops-fastapi-staging
+
+      - name: Notify on Failure
+        if: failure()
+        run: |
+          echo "❌ Staging Deployment Failed"
+          echo "Please check the logs and VM status"
+          echo "VM: ${{ secrets.VM_HOST }}"
+          echo "Environment: staging"

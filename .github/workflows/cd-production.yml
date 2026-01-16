@@ -16,79 +16,78 @@ on:
 env:
   DOCKER_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/devops-fastapi
   DEPLOYMENT_PORT: 8000
+  ENVIRONMENT: production
 
 jobs:
   deploy-production:
-    name: Deploy to Production
+    name: Deploy to Production VM
     runs-on: ubuntu-latest
     if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
     environment:
       name: production
-      url: http://localhost:8000
+      url: http://${{ secrets.VM_HOST }}:8000
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Login to DockerHub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Pull Docker Image
+      - name: Determine Image Tag
+        id: image_tag
         run: |
           if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
             IMAGE_TAG="${{ github.event.inputs.version }}"
           else
             IMAGE_TAG="latest"
           fi
-          docker pull ${{ env.DOCKER_IMAGE }}:${IMAGE_TAG}
-          echo "✅ Pulled Docker image: ${{ env.DOCKER_IMAGE }}:${IMAGE_TAG}"
+          echo "IMAGE_TAG=${IMAGE_TAG}" >> $GITHUB_OUTPUT
+          echo "📦 Deploying image tag: ${IMAGE_TAG}"
 
-      - name: Backup Current Container
-        continue-on-error: true
+      - name: Setup SSH
         run: |
-          if docker ps -a | grep -q devops-fastapi-production; then
-            docker commit devops-fastapi-production devops-fastapi-backup:$(date +%Y%m%d-%H%M%S)
-            echo "✅ Created backup of current production container"
-          fi
+          mkdir -p ~/.ssh
+          echo "${{ secrets.VM_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -p ${{ secrets.VM_SSH_PORT || 22 }} -H ${{ secrets.VM_HOST }} >> ~/.ssh/known_hosts
+          echo "✅ SSH configured"
 
-      - name: Stop Existing Container
-        continue-on-error: true
+      - name: Copy Deployment Script to VM
         run: |
-          docker stop devops-fastapi-production || true
-          docker rm devops-fastapi-production || true
-          echo "🔄 Stopped existing production container"
+          scp -i ~/.ssh/deploy_key \
+              -P ${{ secrets.VM_SSH_PORT || 22 }} \
+              scripts/vm-deploy.sh \
+              ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }}:~/deployments/scripts/
+          echo "✅ Deployment script copied to VM"
 
-      - name: Deploy to Production
+      - name: Pre-deployment Health Check
         run: |
-          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
-            IMAGE_TAG="${{ github.event.inputs.version }}"
-          else
-            IMAGE_TAG="latest"
-          fi
-          
-          docker run -d \
-            --name devops-fastapi-production \
-            -p ${{ env.DEPLOYMENT_PORT }}:8000 \
-            --restart unless-stopped \
-            -e ENVIRONMENT=production \
-            ${{ env.DOCKER_IMAGE }}:${IMAGE_TAG}
-          
-          echo "⏳ Waiting for application to start..."
-          sleep 15
+          echo "🔍 Checking current production status..."
+          ssh -i ~/.ssh/deploy_key \
+              -p ${{ secrets.VM_SSH_PORT || 22 }} \
+              ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} \
+              "docker ps | grep devops-fastapi-production || echo 'No production container running'"
 
-      - name: Health Check
+      - name: Deploy to Production VM
         run: |
+          ssh -i ~/.ssh/deploy_key \
+              -p ${{ secrets.VM_SSH_PORT || 22 }} \
+              ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} \
+              "bash ~/deployments/scripts/vm-deploy.sh \
+                ${{ env.ENVIRONMENT }} \
+                ${{ env.DOCKER_IMAGE }} \
+                ${{ steps.image_tag.outputs.IMAGE_TAG }} \
+                ${{ env.DEPLOYMENT_PORT }}"
+
+      - name: Verify Deployment
+        run: |
+          echo "🔍 Verifying production deployment on VM..."
           max_attempts=15
           attempt=1
           
           while [ $attempt -le $max_attempts ]; do
-            echo "🔍 Health check attempt $attempt/$max_attempts"
-            response=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:${{ env.DEPLOYMENT_PORT }}/health)
+            echo "Verification attempt $attempt/$max_attempts"
+            response=$(curl -s -o /dev/null -w "%{http_code}" http://${{ secrets.VM_HOST }}:${{ env.DEPLOYMENT_PORT }}/health || echo "000")
             
             if [ $response -eq 200 ]; then
-              echo "✅ Production deployment successful - Health check passed"
+              echo "✅ Production deployment verified - Health check passed"
               exit 0
             fi
             
@@ -97,7 +96,7 @@ jobs:
             attempt=$((attempt + 1))
           done
           
-          echo "❌ Health check failed after $max_attempts attempts"
+          echo "❌ Verification failed after $max_attempts attempts"
           exit 1
 
       - name: Run Production Smoke Tests
@@ -105,21 +104,21 @@ jobs:
           echo "🧪 Running production smoke tests..."
           
           # Test health endpoint
-          health_response=$(curl -s http://localhost:${{ env.DEPLOYMENT_PORT }}/health)
+          health_response=$(curl -s http://${{ secrets.VM_HOST }}:${{ env.DEPLOYMENT_PORT }}/health)
           echo "Health Response: $health_response"
-          curl -f http://localhost:${{ env.DEPLOYMENT_PORT }}/health || exit 1
+          curl -f http://${{ secrets.VM_HOST }}:${{ env.DEPLOYMENT_PORT }}/health || exit 1
           echo "✅ Health endpoint test passed"
           
           # Test items endpoint
-          curl -f http://localhost:${{ env.DEPLOYMENT_PORT }}/items || exit 1
+          curl -f http://${{ secrets.VM_HOST }}:${{ env.DEPLOYMENT_PORT }}/items || exit 1
           echo "✅ Items endpoint test passed"
           
           # Test root endpoint
-          curl -f http://localhost:${{ env.DEPLOYMENT_PORT }}/ || exit 1
+          curl -f http://${{ secrets.VM_HOST }}:${{ env.DEPLOYMENT_PORT }}/ || exit 1
           echo "✅ Root endpoint test passed"
           
           # Test API documentation
-          curl -f http://localhost:${{ env.DEPLOYMENT_PORT }}/docs || exit 1
+          curl -f http://${{ secrets.VM_HOST }}:${{ env.DEPLOYMENT_PORT }}/docs || exit 1
           echo "✅ API documentation accessible"
           
           echo "✅ All production smoke tests passed"
@@ -129,7 +128,7 @@ jobs:
           echo "⚡ Running performance checks..."
           
           # Test response time
-          response_time=$(curl -o /dev/null -s -w '%{time_total}\n' http://localhost:${{ env.DEPLOYMENT_PORT }}/health)
+          response_time=$(curl -o /dev/null -s -w '%{time_total}\n' http://${{ secrets.VM_HOST }}:${{ env.DEPLOYMENT_PORT }}/health)
           echo "Response time: ${response_time}s"
           
           # Check if response time is acceptable (less than 2 seconds)
@@ -139,78 +138,73 @@ jobs:
             echo "⚠️ Warning: Response time is higher than expected"
           fi
 
-      - name: Rollback on Failure
-        if: failure()
+      - name: Get Container Status
+        if: always()
         run: |
-          echo "❌ Production deployment failed - Initiating rollback"
-          
-          docker stop devops-fastapi-production || true
-          docker rm devops-fastapi-production || true
-          
-          # Find the most recent backup
-          backup_image=$(docker images devops-fastapi-backup --format "{{.Repository}}:{{.Tag}}" | head -n 1)
-          
-          if [ ! -z "$backup_image" ]; then
-            echo "🔄 Rolling back to: $backup_image"
-            docker run -d \
-              --name devops-fastapi-production \
-              -p ${{ env.DEPLOYMENT_PORT }}:8000 \
-              --restart unless-stopped \
-              -e ENVIRONMENT=production \
-              $backup_image
-            
-            sleep 10
-            
-            # Verify rollback
-            if curl -f http://localhost:${{ env.DEPLOYMENT_PORT }}/health; then
-              echo "✅ Rollback successful"
-            else
-              echo "❌ Rollback failed - Manual intervention required"
-            fi
-          else
-            echo "⚠️ No backup found - Manual intervention required"
-          fi
+          echo "📊 Production Container Status on VM:"
+          ssh -i ~/.ssh/deploy_key \
+              -p ${{ secrets.VM_SSH_PORT || 22 }} \
+              ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} \
+              "docker ps | grep devops-fastapi-production || echo 'Container not running'"
 
-      - name: Cleanup Old Backups
+      - name: Get Container Stats
         if: success()
         run: |
-          echo "🧹 Cleaning up old backups (keeping last 3)"
-          docker images devops-fastapi-backup --format "{{.Repository}}:{{.Tag}}" | tail -n +4 | xargs -r docker rmi || true
+          echo "📈 Container Resource Usage:"
+          ssh -i ~/.ssh/deploy_key \
+              -p ${{ secrets.VM_SSH_PORT || 22 }} \
+              ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} \
+              "docker stats devops-fastapi-production --no-stream --format 'table {{.Container}}\t{{.CPUPerc}}\t{{.MemUsage}}' || echo 'Stats not available'"
+
+      - name: Get Container Logs
+        if: failure()
+        run: |
+          echo "📋 Production Container Logs:"
+          ssh -i ~/.ssh/deploy_key \
+              -p ${{ secrets.VM_SSH_PORT || 22 }} \
+              ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} \
+              "docker logs devops-fastapi-production --tail 100 || echo 'No logs available'"
+
+      - name: Cleanup Old Docker Images
+        if: success()
+        run: |
+          echo "🧹 Cleaning up old Docker images on VM..."
+          ssh -i ~/.ssh/deploy_key \
+              -p ${{ secrets.VM_SSH_PORT || 22 }} \
+              ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} \
+              "docker image prune -f || true"
+
+      - name: Cleanup SSH
+        if: always()
+        run: |
+          rm -f ~/.ssh/deploy_key
+          echo "✅ SSH cleanup completed"
 
       - name: Deployment Summary
         if: success()
         run: |
-          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
-            IMAGE_TAG="${{ github.event.inputs.version }}"
-          else
-            IMAGE_TAG="latest"
-          fi
-          
           echo "🎉 Production Deployment Summary"
           echo "================================"
           echo "Environment: Production"
-          echo "Image: ${{ env.DOCKER_IMAGE }}:${IMAGE_TAG}"
+          echo "Image: ${{ env.DOCKER_IMAGE }}:${{ steps.image_tag.outputs.IMAGE_TAG }}"
+          echo "VM Host: ${{ secrets.VM_HOST }}"
           echo "Port: ${{ env.DEPLOYMENT_PORT }}"
           echo "Status: ✅ Deployed Successfully"
           echo "Deployed at: $(date)"
           echo "Trigger: ${{ github.event_name }}"
+          echo "URL: http://${{ secrets.VM_HOST }}:${{ env.DEPLOYMENT_PORT }}"
           echo "================================"
-          docker ps | grep devops-fastapi-production
 
       - name: Send Notification
         if: always()
         run: |
-          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
-            IMAGE_TAG="${{ github.event.inputs.version }}"
-          else
-            IMAGE_TAG="latest"
-          fi
-          
           if [ "${{ job.status }}" == "success" ]; then
             echo "✅ Production deployment completed successfully"
-            echo "Image: ${{ env.DOCKER_IMAGE }}:${IMAGE_TAG}"
+            echo "Image: ${{ env.DOCKER_IMAGE }}:${{ steps.image_tag.outputs.IMAGE_TAG }}"
+            echo "VM: ${{ secrets.VM_HOST }}"
             echo "Trigger: ${{ github.event_name }}"
           else
             echo "❌ Production deployment failed"
+            echo "VM: ${{ secrets.VM_HOST }}"
             echo "Please check the logs and take necessary action"
           fi

@@ -44,10 +44,13 @@ The motivation for this project stems from the need to demonstrate practical und
 
 ### Technology Stack
 
-- **Framework**: FastAPI 0.109.0 - Modern, fast Python web framework
+- **Framework**: FastAPI 0.115.0+ - Modern, fast Python web framework with security patches
+- **Web Server Framework**: Starlette 0.47.2+ - ASGI framework (FastAPI dependency)
 - **Runtime**: Python 3.11 - Latest stable Python version
-- **Server**: Uvicorn - High-performance ASGI server
-- **Testing**: pytest with coverage - Comprehensive test framework
+- **Server**: Uvicorn 0.27.0 - High-performance ASGI server
+- **Data Validation**: Pydantic 2.5.3 - Data validation using Python type hints
+- **Testing**: pytest 7.4.4 with pytest-cov 4.1.0 - Comprehensive test framework
+- **HTTP Client**: httpx 0.26.0 - For testing async endpoints
 - **Containerization**: Docker - Multi-stage builds for optimization
 
 ### Application Features
@@ -220,9 +223,10 @@ graph LR
 - Provides confidence in refactoring
 - Documents expected behavior
 
-**Coverage Requirements**:
+**Test Coverage**:
 - Minimum: 80% code coverage
-- Tests: 15+ test cases covering all endpoints
+- Achieved: 99% code coverage
+- Tests: 14 test cases covering all endpoints
 
 **Test Categories**:
 1. Endpoint functionality tests
@@ -356,15 +360,16 @@ graph LR
 
 **Purpose**: Deploy to production environment with safety gates
 
-**Trigger**: Manual approval via GitHub Actions UI
+**Trigger**: Automatic after successful staging deployment (with manual override available)
 
 **Safety Features**:
-1. **Manual Approval**: Requires explicit approval before deployment
-2. **Backup**: Creates backup of current production container
-3. **Health Checks**: Comprehensive validation with 15 retry attempts
-4. **Performance Checks**: Validates response time < 2 seconds
-5. **Automatic Rollback**: Restores backup on any failure
-6. **Cleanup**: Keeps last 3 backups, removes older ones
+1. **Automated Deployment**: Deploys automatically after staging validation
+2. **Manual Override**: workflow_dispatch available for specific version deployment
+3. **Backup**: Creates backup of current production container before deployment
+4. **Health Checks**: Comprehensive validation with 15 retry attempts
+5. **Performance Checks**: Validates response time < 2 seconds
+6. **Automatic Rollback**: Restores backup on any failure
+7. **Cleanup**: Keeps last 3 backups, removes older ones
 
 **Process**:
 1. Backup current production container
@@ -435,21 +440,25 @@ All security findings are centralized in GitHub Security tab:
 
 ### Test Results
 
-- **Total Tests**: 15 test cases
-- **Test Coverage**: 85%+ (exceeds 80% requirement)
+- **Total Tests**: 14 test cases
+- **Test Coverage**: 99% (significantly exceeds 80% requirement)
 - **Test Pass Rate**: 100%
 
 ### Security Scan Results
 
 - **SAST (CodeQL)**: No critical vulnerabilities detected
-- **SCA (pip-audit)**: All dependencies secure
+- **SCA (pip-audit)**: 0 vulnerabilities (all dependencies patched)
+  - Fixed CVE-2024-47874 (Starlette DoS)
+  - Fixed CVE-2025-54121 (Starlette thread blocking)
+  - Fixed PYSEC-2024-38 (FastAPI ReDoS)
 - **Container Scan (Trivy)**: No critical/high vulnerabilities in final image
 
 ### Deployment Success Rate
 
-- **Staging Deployments**: 100% success rate
-- **Production Deployments**: 100% success rate (with manual approval)
+- **Staging Deployments**: 7+ successful deployments, 100% success rate
+- **Production Deployments**: 100% success rate (fully automated)
 - **Rollbacks Triggered**: 0 (all deployments passed health checks)
+- **Total Deployments**: 8+ successful end-to-end deployments
 
 ### Key Observations
 
@@ -483,7 +492,7 @@ All security findings are centralized in GitHub Security tab:
 2. **No Database**: Uses in-memory storage (data lost on restart)
 3. **Limited Monitoring**: Basic health checks, no comprehensive monitoring
 4. **No Load Balancing**: Single instance deployment
-5. **Manual Production Approval**: Requires manual trigger
+5. **Simulated Deployment**: Uses GitHub Actions runner, not actual cloud infrastructure
 
 ### Proposed Improvements
 

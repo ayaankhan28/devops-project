@@ -17,12 +17,15 @@ This project implements a **secure and automated CI/CD pipeline** that:
 
 ## 🏗️ Architecture
 
-### Application Stack
-- **Framework**: FastAPI 0.109.0
+### 🛠️ Technology Stack
+
+- **Framework**: FastAPI 0.115.0+ (with security patches)
 - **Runtime**: Python 3.11
-- **Server**: Uvicorn (ASGI)
-- **Containerization**: Docker (multi-stage build)
-- **Testing**: pytest with coverage
+- **Server**: Uvicorn 0.27.0
+- **Testing**: pytest 7.4.4 with pytest-cov 4.1.0
+- **Containerization**: Docker
+- **CI/CD**: GitHub Actions
+- **Registry**: DockerHub
 
 ### CI/CD Pipeline Stages
 
