@@ -1,0 +1,190 @@
+name: CD - Deploy to Kubernetes
+
+on:
+  workflow_run:
+    workflows: ["CI Pipeline"]
+    types:
+      - completed
+    branches: [master, main]
+  workflow_dispatch:
+
+env:
+  DOCKER_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/devops-fastapi
+
+jobs:
+  deploy-k8s:
+    name: Deploy to Kubernetes Cluster
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup kubectl
+      uses: azure/setup-kubectl@v3
+      with:
+        version: 'v1.28.0'
+        
+    - name: Configure kubectl
+      run: |
+        echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > kubeconfig
+        export KUBECONFIG=kubeconfig
+        kubectl config current-context
+        kubectl get nodes  # Verify connection
+        
+    - name: Setup K3s Connection
+      run: |
+        export KUBECONFIG=kubeconfig
+        echo "✅ Connecting to K3s cluster..."
+        kubectl get nodes
+        echo "✅ K3s cluster ready (using built-in Traefik, no need for NGINX)"
+        
+    - name: Deploy to Kubernetes
+      run: |
+        export KUBECONFIG=kubeconfig
+        
+        echo "🚀 Deploying to Kubernetes..."
+        
+        # Apply namespace first
+        echo "📝 Creating namespace..."
+        kubectl apply -f k8s/namespace.yaml
+        
+        # Create Docker registry secret for pulling images from DockerHub
+        echo "🔑 Creating Docker registry secret..."
+        kubectl create secret docker-registry dockerhub-secret \
+          --docker-server=https://index.docker.io/v1/ \
+          --docker-username=${{ secrets.DOCKERHUB_USERNAME }} \
+          --docker-password=${{ secrets.DOCKERHUB_TOKEN }} \
+          --namespace=staging \
+          --dry-run=client -o yaml | kubectl apply -f -
+        
+        # Apply ConfigMap
+        echo "⚙️  Applying ConfigMap..."
+        kubectl apply -f k8s/configmap.yaml
+        
+        # Apply Service
+        echo "🔌 Applying Service..."
+        kubectl apply -f k8s/service-staging.yaml
+        
+        # Update and apply Deployment
+        echo "🐳 Applying Deployment..."
+        # Use commit SHA if available, otherwise latest
+        if [ -n "${{ github.event.workflow_run.head_sha }}" ]; then
+          IMAGE_TAG="${{ github.event.workflow_run.head_sha }}"
+        else
+          IMAGE_TAG="latest"
+        fi
+        
+        # Update image in deployment and apply
+        sed "s|ayaankhan28/devops-fastapi:latest|${DOCKER_IMAGE}:${IMAGE_TAG}|g" k8s/deployment-staging.yaml | kubectl apply -f -
+        
+        echo "✅ Deployment manifests applied (using NodePort for K3s)"
+          
+    - name: Wait for Rollout Completion
+      run: |
+        export KUBECONFIG=kubeconfig
+        
+        echo "⏳ Waiting for deployment rollout..."
+        if ! kubectl rollout status deployment/devops-fastapi -n staging --timeout=600s; then
+          echo "❌ Rollout failed or timed out"
+          echo "Pod status:"
+          kubectl get pods -n staging -l app=devops-fastapi
+          echo ""
+          echo "Recent events:"
+          kubectl get events -n staging --sort-by='.lastTimestamp' | tail -20
+          echo ""
+          echo "Pod descriptions:"
+          kubectl describe pods -n staging -l app=devops-fastapi
+          exit 1
+        fi
+        
+        echo "✅ Rollout completed successfully"
+        
+    - name: Verify Deployment Health
+      run: |
+        export KUBECONFIG=kubeconfig
+        
+        echo "📊 Deployment status:"
+        kubectl get deployment devops-fastapi -n staging
+        
+        echo ""
+        echo "📦 Pod status:"
+        kubectl get pods -l app=devops-fastapi -n staging
+        
+        echo ""
+        echo "🔌 Service status:"
+        kubectl get svc devops-fastapi -n staging
+        
+        # Get NodePort and Node IP
+        NODE_PORT=$(kubectl get svc devops-fastapi -n staging -o jsonpath='{.spec.ports[0].nodePort}')
+        NODE_IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="ExternalIP")].address}')
+        
+        # If no external IP, try internal IP (for testing)
+        if [ -z "$NODE_IP" ]; then
+          NODE_IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
+        fi
+        
+        echo ""
+        echo "🌍 NodePort: $NODE_PORT"
+        echo "🌍 Node IP: $NODE_IP"
+        echo "🔗 App URL: http://$NODE_IP:$NODE_PORT"
+        
+        # Wait and test health endpoint
+        echo ""
+        echo "🏥 Testing health endpoint..."
+        for i in {1..20}; do
+          if curl -f --max-time 10 "http://$NODE_IP:$NODE_PORT/health" 2>/dev/null; then
+            echo ""
+            echo "✅ Deployment successful!"
+            echo "🎉 Access your app at: http://$NODE_IP:$NODE_PORT"
+            echo "📚 API Docs: http://$NODE_IP:$NODE_PORT/docs"
+            exit 0
+          fi
+          echo "⏳ Waiting for app to be ready... (attempt $i/20)"
+          sleep 5
+        done
+        
+        echo "⚠️  Health check timeout - checking pod logs..."
+        kubectl logs -n staging -l app=devops-fastapi --tail=50
+        
+    - name: Rollback on Failure
+      if: failure()
+      run: |
+        export KUBECONFIG=kubeconfig
+        echo "❌ Deployment failed, attempting rollback..."
+        
+        # Check if deployment exists before trying to rollback
+        if kubectl get deployment devops-fastapi -n staging > /dev/null 2>&1; then
+          echo "🔄 Rolling back deployment..."
+          kubectl rollout undo deployment/devops-fastapi -n staging
+          kubectl rollout status deployment/devops-fastapi -n staging --timeout=300s
+          echo "✅ Rollback completed"
+        else
+          echo "⚠️  Deployment doesn't exist yet, cleaning up resources..."
+          kubectl delete -f k8s/ --ignore-not-found=true -n staging
+          echo "✅ Cleanup completed"
+        fi
+        
+    - name: Deployment Summary
+      if: success()
+      run: |
+        export KUBECONFIG=kubeconfig
+        NODE_PORT=$(kubectl get svc devops-fastapi -n staging -o jsonpath='{.spec.ports[0].nodePort}')
+        NODE_IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="ExternalIP")].address}')
+        
+        if [ -z "$NODE_IP" ]; then
+          NODE_IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
+        fi
+        
+        echo "🎉 Kubernetes Deployment Summary"
+        echo "================================"
+        echo "Environment: K3s on DigitalOcean VM"
+        echo "Image: ${{ env.DOCKER_IMAGE }}:${{ github.event.workflow_run.head_sha || 'latest' }}"
+        echo "Namespace: staging"
+        echo "Status: ✅ Deployed Successfully"
+        echo "Access Type: NodePort"
+        echo "URL: http://$NODE_IP:$NODE_PORT"
+        echo "Health: http://$NODE_IP:$NODE_PORT/health"
+        echo "API Docs: http://$NODE_IP:$NODE_PORT/docs"
+        echo "================================"

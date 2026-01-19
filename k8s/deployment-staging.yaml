@@ -1,0 +1,73 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: devops-fastapi
+  namespace: staging
+  labels:
+    app: devops-fastapi
+    environment: staging
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: devops-fastapi
+      environment: staging
+  template:
+    metadata:
+      labels:
+        app: devops-fastapi
+        environment: staging
+    spec:
+      # Add image pull secret for DockerHub (will be created by CD workflow)
+      imagePullSecrets:
+      - name: dockerhub-secret
+      
+      containers:
+      - name: fastapi
+        image: ayaankhan28/devops-fastapi:latest  # Will be updated by CI/CD
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8000
+          name: http
+          protocol: TCP
+        
+        # Resource limits for cloud cluster
+        resources:
+          limits:
+            memory: "128Mi"
+            cpu: "200m"
+          requests:
+            memory: "64Mi"
+            cpu: "100m"
+        
+        # Health checks
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 10
+          periodSeconds: 30
+          timeoutSeconds: 5
+          failureThreshold: 3
+        
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 3
+        
+        # Environment variables from ConfigMap
+        envFrom:
+        - configMapRef:
+            name: app-config
+      
+      # Restart policy
+      restartPolicy: Always

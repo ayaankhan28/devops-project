@@ -1,0 +1,19 @@
+---
+# Namespace for Staging Environment
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: staging
+  labels:
+    environment: staging
+    app: devops-fastapi
+
+---
+# Namespace for Production Environment
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: production
+  labels:
+    environment: production
+    app: devops-fastapi
