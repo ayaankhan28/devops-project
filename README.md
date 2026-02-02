@@ -1,5 +1,6 @@
 # DevOps CI/CD Project - FastAPI Application
 
+
 [![CI Pipeline](https://github.com/ayaankhan28/devops-project/actions/workflows/ci.yml/badge.svg)](https://github.com/ayaankhan28/devops-project/actions/workflows/ci.yml)
 [![CD Staging](https://github.com/ayaankhan28/devops-project/actions/workflows/cd-staging.yml/badge.svg)](https://github.com/ayaankhan28/devops-project/actions/workflows/cd-staging.yml)
 
